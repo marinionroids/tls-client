@@ -141,3 +141,23 @@ func TestWsConnectFailureLeavesNoConnection(t *testing.T) {
 	wsConnections.Range(func(_, _ any) bool { count++; return true })
 	require.Zero(t, count)
 }
+
+func TestWsWriteErrorClosesConnection(t *testing.T) {
+	connectionId := wsTestConnect(t)
+
+	c, _ := getWsConn(connectionId)
+	_ = c.conn.NetConn().Close() // simulate a dead tunnel
+
+	readErr := make(chan *TLSClientError)
+	go func() {
+		_, err := WsRead(WsReadInput{ConnectionId: connectionId})
+		readErr <- err
+	}()
+
+	_, err := WsWrite(WsWriteInput{ConnectionId: connectionId, MessageType: websocket.TextMessage, Data: "x"})
+	require.NotNil(t, err)
+	require.NotNil(t, <-readErr)
+
+	_, ok := wsConnections.Load(connectionId)
+	require.False(t, ok)
+}

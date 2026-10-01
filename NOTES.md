@@ -56,6 +56,12 @@ Other `wsConnect` fields: `sessionId`, `customTlsClient`, `readBufferSize`, `wri
 - **Threading.** One reader goroutine per connection answers pings even when nobody is in `wsRead`.
   `wsWrite` is safe alongside `wsRead` and other `wsWrite` calls. Use one `wsRead` caller per
   connection (several would each get different messages). `wsClose` releases a blocked `wsRead`.
+- **Node/koffi: raise `UV_THREADPOOL_SIZE`.** koffi `.async` calls run on the libuv thread pool
+  (default 4 threads) and every open socket parks one thread in `wsRead`. With 4+ quiet sockets,
+  `wsWrite` (and DNS, fs, crypto) queues behind the reads for up to the read timeout, so app-level
+  keepalives go out late and the server drops the connection. Set `UV_THREADPOOL_SIZE` in the
+  process environment to at least open sockets + 8 (max 1024).
+- A failed `wsWrite` closes the connection and drops its `connectionId`, same as a failed read.
 - Unread messages are not buffered in the library: if the caller stops calling `wsRead`, the reader
   blocks and TCP backpressure applies.
 - `destroySession` / `destroyAll` do not close WebSocket connections. Call `wsClose`.

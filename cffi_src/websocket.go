@@ -227,7 +227,8 @@ func WsRead(input WsReadInput) (WsReadOutput, *TLSClientError) {
 }
 
 // WsWrite sends a message over an active WebSocket connection. Safe to call concurrently with
-// WsRead and with other WsWrite calls on the same connection.
+// WsRead and with other WsWrite calls on the same connection. A failed write closes the
+// connection and removes it from the store.
 // For binary messages (MessageType 2) the Data field must be base64-encoded.
 func WsWrite(input WsWriteInput) (WsWriteOutput, *TLSClientError) {
 	c, clientErr := getWsConn(input.ConnectionId)
@@ -253,6 +254,10 @@ func WsWrite(input WsWriteInput) (WsWriteOutput, *TLSClientError) {
 	c.writeLck.Unlock()
 
 	if writeErr != nil {
+		// write errors are permanent on a websocket conn: drop it so a blocked WsRead returns
+		// and the caller does not keep writing into a dead socket
+		closeWsConn(input.ConnectionId)
+
 		return WsWriteOutput{}, NewTLSClientError(fmt.Errorf("failed to write message: %w", writeErr))
 	}
 
