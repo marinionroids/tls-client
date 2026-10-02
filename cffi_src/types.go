@@ -250,10 +250,13 @@ type WsReadOutput struct {
 
 // WsWriteInput contains the parameters for sending a message over a WebSocket connection.
 // For binary messages (MessageType 2), Data must be base64-encoded.
+// TimeoutMilliseconds > 0 bounds how long the write may block (peer not reading, dead path); a write
+// that times out closes the connection. 0 = no deadline.
 type WsWriteInput struct {
-	ConnectionId string `json:"connectionId"`
-	Data         string `json:"data"`
-	MessageType  int    `json:"messageType"`
+	ConnectionId        string `json:"connectionId"`
+	Data                string `json:"data"`
+	MessageType         int    `json:"messageType"`
+	TimeoutMilliseconds int    `json:"timeoutMilliseconds"`
 }
 
 // WsWriteOutput is returned after sending a WebSocket message.

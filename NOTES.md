@@ -33,7 +33,7 @@ Errors use the normal error shape (`status: 0`, message in `body`).
 // -> { "id": "...", "connectionId": "ws-uuid", "messageType": 1, "data": "..." }
 
 // wsWrite
-{ "connectionId": "ws-uuid", "messageType": 2, "data": "<base64>" }
+{ "connectionId": "ws-uuid", "messageType": 2, "data": "<base64>", "timeoutMilliseconds": 5000 }
 // -> { "id": "...", "connectionId": "ws-uuid", "success": true }
 
 // wsClose
@@ -55,7 +55,8 @@ Other `wsConnect` fields: `sessionId`, `customTlsClient`, `readBufferSize`, `wri
 
 ## Things to know
 
-- **permessage-deflate is on.** `websocket.Dialer.EnableCompression` is true so the upgrade
+- **permessage-deflate is on** for the shared library (`WsConnect` passes `WithEnableCompression()`;
+  Go users of `NewWebsocket` opt in with the same option, default off as before) so the upgrade
   sends `Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_no_context_takeover`
   (iOS URLSession / ktor-client offer deflate; capture 2026-10-02). Gorilla decompresses if the
   server accepts. Tag `v1.16.0-ws.3`.
@@ -81,10 +82,30 @@ Other `wsConnect` fields: `sessionId`, `customTlsClient`, `readBufferSize`, `wri
   message is waiting and the caller is not in `wsRead`. Counters are data messages, not ping/pong.
   A connection that already failed or was closed is gone from the store, so call it before `wsClose`.
 - A failed `wsWrite` closes the connection and drops its `connectionId`, same as a failed read.
+- **Pass `timeoutMilliseconds` to `wsWrite`.** Without it a write to a peer that stopped reading
+  (or a dead path with a full send buffer) blocks its thread until the kernel gives up, minutes.
+  A write that times out closes the connection. 0 / omitted = no deadline (old behaviour).
 - Unread messages are not buffered in the library: if the caller stops calling `wsRead`, the reader
   blocks and TCP backpressure applies.
 - `destroySession` / `destroyAll` do not close WebSocket connections. Call `wsClose`.
 - `status` in the `wsConnect` output is always 101; a failed handshake is an error response.
+
+## Stress tests
+
+`cffi_src/websocket_stress_test.go`, skipped with `-short`:
+
+```bash
+docker run --rm --ulimit nofile=65536 -v $PWD:/src -w /src golang:1.24-bullseye \
+  go test -race -run WsStress ./cffi_src/      # WS_STRESS_CONNS=200 WS_STRESS_SECONDS=20
+```
+
+200 connections x 4 concurrent writers with checksummed payloads up to 4 MB, 1 ms read-timeout storm,
+random connect/read/write/stats/close from 32 goroutines on shared ids, hostile peers (TCP drop, close
+frame, drop mid message, ping flood, invalid UTF-8), a peer that stops reading, a caller that stops
+reading, permessage-deflate round trips, and a soak. Every test also asserts an empty connection store
+and no leaked goroutines. Found and fixed (2026-10-02): `wsClose` / a failed write took ~6 s on a
+stalled path (TLS close_notify wait), `unreadPending` could still read true right after the message
+was collected, and `wsWrite` had no way to bound a blocked write.
 
 ## Diff vs upstream PR #251
 

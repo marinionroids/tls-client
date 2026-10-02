@@ -12,8 +12,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func wsEchoServer(t *testing.T) string {
-	upgrader := websocket.Upgrader{}
+// wsServer starts a local TLS websocket server and returns its wss:// url. handle runs once per
+// upgraded connection, which is closed when it returns.
+func wsServer(t *testing.T, upgrader websocket.Upgrader, handle func(conn *websocket.Conn)) string {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -21,36 +22,52 @@ func wsEchoServer(t *testing.T) string {
 		}
 		defer conn.Close()
 
-		for {
-			mt, msg, err := conn.ReadMessage()
-			if err != nil {
-				return
-			}
-			if err := conn.WriteMessage(mt, msg); err != nil {
-				return
-			}
-		}
+		handle(conn)
 	}))
 	t.Cleanup(server.Close)
 
 	return "wss" + strings.TrimPrefix(server.URL, "https")
 }
 
-func wsTestConnect(t *testing.T) string {
-	out, err := WsConnect(WsConnectInput{
+func wsEcho(conn *websocket.Conn) {
+	for {
+		mt, msg, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		if err := conn.WriteMessage(mt, msg); err != nil {
+			return
+		}
+	}
+}
+
+func wsEchoServer(t *testing.T) string {
+	return wsServer(t, websocket.Upgrader{}, wsEcho)
+}
+
+func wsDial(url string) (WsConnectOutput, *TLSClientError) {
+	return WsConnect(WsConnectInput{
 		TLSClientIdentifier:          "chrome_133",
-		Url:                          wsEchoServer(t),
+		Url:                          url,
 		Headers:                      map[string]string{"User-Agent": "cffi-ws-test"},
 		HeaderOrder:                  []string{"host", "upgrade", "connection", "user-agent"},
-		HandshakeTimeoutMilliseconds: 5000,
+		HandshakeTimeoutMilliseconds: 30000,
 		InsecureSkipVerify:           true,
 	})
+}
+
+func wsConnectTo(t *testing.T, url string) string {
+	out, err := wsDial(url)
 	require.Nil(t, err)
 	require.Equal(t, 101, out.Status)
 	require.NotEmpty(t, out.ConnectionId)
 	require.Empty(t, out.SessionId)
 
 	return out.ConnectionId
+}
+
+func wsTestConnect(t *testing.T) string {
+	return wsConnectTo(t, wsEchoServer(t))
 }
 
 func TestWsEchoTextAndBinary(t *testing.T) {

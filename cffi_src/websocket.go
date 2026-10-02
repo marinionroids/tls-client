@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -47,7 +48,11 @@ type wsConn struct {
 	lastWriteAt     atomic.Int64
 	lastWriteDurMs  atomic.Int64
 	maxWriteDurMs   atomic.Int64
-	unreadPending   atomic.Bool // readPump holds a message nobody has collected with WsRead yet
+	// readPump holds a message nobody has collected with WsRead yet when pumped > collected. Two
+	// counters, not a flag: a flag cleared by the pump after the handover is still set when the
+	// caller that just got the message asks for stats.
+	pumped    atomic.Int64
+	collected atomic.Int64
 }
 
 func (c *wsConn) readPump() {
@@ -59,10 +64,9 @@ func (c *wsConn) readPump() {
 			c.lastReadAt.Store(time.Now().UnixMilli())
 		}
 
-		c.unreadPending.Store(true)
+		c.pumped.Add(1)
 		select {
 		case c.messages <- wsMessage{messageType: mt, data: data, err: err}:
-			c.unreadPending.Store(false)
 		case <-c.done:
 			return
 		}
@@ -77,7 +81,14 @@ func (c *wsConn) close() {
 	c.closeOnce.Do(func() {
 		close(c.done)
 		// best effort close frame; WriteControl is safe concurrently with other writes
-		_ = c.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
+		err := c.conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), time.Now().Add(time.Second))
+		if err != nil {
+			// the path is dead or stalled: close the socket under TLS first, otherwise the TLS close
+			// blocks for another 5s trying to send close_notify
+			if tlsConn, ok := c.conn.NetConn().(interface{ NetConn() net.Conn }); ok {
+				_ = tlsConn.NetConn().Close()
+			}
+		}
 		_ = c.conn.Close()
 	})
 }
@@ -157,6 +168,7 @@ func WsConnect(input WsConnectInput) (WsConnectOutput, *TLSClientError) {
 		tls_client.WithTlsClient(tlsClient),
 		tls_client.WithUrl(input.Url),
 		tls_client.WithHeaders(headers),
+		tls_client.WithEnableCompression(),
 	}
 
 	if input.HandshakeTimeoutMilliseconds > 0 {
@@ -222,6 +234,7 @@ func WsRead(input WsReadInput) (WsReadOutput, *TLSClientError) {
 	var msg wsMessage
 	select {
 	case msg = <-c.messages:
+		c.collected.Add(1)
 	case <-timeout:
 		return WsReadOutput{}, NewTLSClientError(fmt.Errorf(ErrWsReadTimeout))
 	case <-c.done:
@@ -271,7 +284,13 @@ func WsWrite(input WsWriteInput) (WsWriteOutput, *TLSClientError) {
 	}
 
 	writeStart := time.Now() // includes the wait for the write lock
+	var deadline time.Time   // zero = none; always set, a deadline from an earlier write would stick
+	if input.TimeoutMilliseconds > 0 {
+		deadline = writeStart.Add(time.Duration(input.TimeoutMilliseconds) * time.Millisecond)
+	}
+
 	c.writeLck.Lock()
+	_ = c.conn.SetWriteDeadline(deadline)
 	writeErr := c.conn.WriteMessage(input.MessageType, msgData)
 	c.writeLck.Unlock()
 
@@ -344,7 +363,7 @@ func WsStats(input WsStatsInput) (WsStatsOutput, *TLSClientError) {
 		MsSinceLastWrite:    since(c.lastWriteAt.Load()),
 		LastWriteDurationMs: c.lastWriteDurMs.Load(),
 		MaxWriteDurationMs:  c.maxWriteDurMs.Load(),
-		UnreadPending:       c.unreadPending.Load(),
+		UnreadPending:       c.pumped.Load() > c.collected.Load(),
 		LocalAddr:           c.conn.LocalAddr().String(),
 		RemoteAddr:          c.conn.RemoteAddr().String(),
 		Tcp:                 wsTcpInfo(c.conn.UnderlyingConn()),
