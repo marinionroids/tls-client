@@ -398,6 +398,34 @@ func wsClose(wsCloseParams *C.char) *C.char {
 	return responseString
 }
 
+//export wsStats
+func wsStats(wsStatsParams *C.char) *C.char {
+	wsStatsParamsJson := C.GoString(wsStatsParams)
+
+	wsStatsInput := tls_client_cffi_src.WsStatsInput{}
+	if marshallError := json.Unmarshal([]byte(wsStatsParamsJson), &wsStatsInput); marshallError != nil {
+		return handleErrorResponse("", false, tls_client_cffi_src.NewTLSClientError(marshallError))
+	}
+
+	out, clientErr := tls_client_cffi_src.WsStats(wsStatsInput)
+	if clientErr != nil {
+		return handleErrorResponse("", false, clientErr)
+	}
+
+	jsonResponse, marshallError := json.Marshal(out)
+	if marshallError != nil {
+		return handleErrorResponse("", false, tls_client_cffi_src.NewTLSClientError(marshallError))
+	}
+
+	responseString := C.CString(string(jsonResponse))
+
+	unsafePointersLck.Lock()
+	unsafePointers[out.Id] = responseString
+	unsafePointersLck.Unlock()
+
+	return responseString
+}
+
 func handleErrorResponse(sessionId string, withSession bool, err *tls_client_cffi_src.TLSClientError) *C.char {
 	response := tls_client_cffi_src.Response{
 		Id:      uuid.New().String(),

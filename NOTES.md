@@ -8,8 +8,8 @@ Adds `wsConnect`, `wsRead`, `wsWrite`, `wsClose` to the shared library. The WS d
 
 ```bash
 docker run --rm -v $PWD:/src -w /src/cffi_dist golang:1.24-bullseye \
-  go build -buildvcs=false -buildmode=c-shared -o dist/tls-client-ws-1.16.0-linux-amd64.so .
-nm -D cffi_dist/dist/*.so | grep -E ' T ws'   # wsClose wsConnect wsRead wsWrite
+  go build -buildvcs=false -buildmode=c-shared -o dist/tls-client-ws-1.16.0-ws.4-linux-amd64.so .
+nm -D cffi_dist/dist/*.so | grep -E ' T ws'   # wsClose wsConnect wsRead wsStats wsWrite
 ```
 
 `cffi_dist/go.mod` now has `replace github.com/bogdanfinn/tls-client => ../` because
@@ -39,6 +39,15 @@ Errors use the normal error shape (`status: 0`, message in `body`).
 // wsClose
 { "connectionId": "ws-uuid" }
 // -> { "id": "...", "success": true }
+
+// wsStats   (diagnostics, never touches the wire; tag v1.16.0-ws.4)
+{ "connectionId": "ws-uuid" }
+// -> { "id": "...", "ageMs": 1506, "messagesRead": 2, "messagesWritten": 1, "bytesRead": 34, "bytesWritten": 2,
+//      "msSinceLastRead": 1464, "msSinceLastWrite": 1503, "lastWriteDurationMs": 0, "maxWriteDurationMs": 0,
+//      "unreadPending": false, "localAddr": "...", "remoteAddr": "...",
+//      "tcp": { "state": 1, "retransmits": 0, "backoff": 0, "rtoMs": 233, "rttMs": 32, "unacked": 0, "lost": 0,
+//               "totalRetrans": 0, "notsentBytes": 0, "msSinceLastDataSent": 1503, "msSinceLastDataRecv": 1465,
+//               "msSinceLastAckRecv": 1465 } }
 ```
 
 Other `wsConnect` fields: `sessionId`, `customTlsClient`, `readBufferSize`, `writeBufferSize`,
@@ -46,6 +55,10 @@ Other `wsConnect` fields: `sessionId`, `customTlsClient`, `readBufferSize`, `wri
 
 ## Things to know
 
+- **permessage-deflate is on.** `websocket.Dialer.EnableCompression` is true so the upgrade
+  sends `Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_no_context_takeover`
+  (iOS URLSession / ktor-client offer deflate; capture 2026-10-02). Gorilla decompresses if the
+  server accepts. Tag `v1.16.0-ws.3`.
 - **Session reuse needs a separate HTTP/1.1 session.** `wsConnect` with `sessionId` uses that client
   as-is and never modifies it. Create it with `forceHttp1: true`; do not pass your normal HTTP/2 session,
   the handshake fails once the server negotiates h2. Without `sessionId` an inline HTTP/1.1 client is
@@ -61,6 +74,12 @@ Other `wsConnect` fields: `sessionId`, `customTlsClient`, `readBufferSize`, `wri
   `wsWrite` (and DNS, fs, crypto) queues behind the reads for up to the read timeout, so app-level
   keepalives go out late and the server drops the connection. Set `UV_THREADPOOL_SIZE` in the
   process environment to at least open sockets + 8 (max 1024).
+- **`wsStats` for silent stalls.** `tcp` is linux `TCP_INFO` for the socket to the server (or to the
+  proxy); it is omitted on other platforms and when the tunnel is not a plain TCP socket (h2 proxy).
+  `unacked` / `retransmits` / `backoff` > 0 with a large `msSinceLastAckRecv` = our bytes are not being
+  acknowledged (dead path, writes still "succeed" into the send buffer). `unreadPending: true` = a
+  message is waiting and the caller is not in `wsRead`. Counters are data messages, not ping/pong.
+  A connection that already failed or was closed is gone from the store, so call it before `wsClose`.
 - A failed `wsWrite` closes the connection and drops its `connectionId`, same as a failed read.
 - Unread messages are not buffered in the library: if the caller stops calling `wsRead`, the reader
   blocks and TCP backpressure applies.

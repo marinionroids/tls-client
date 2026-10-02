@@ -57,6 +57,8 @@ func NewWebsocket(logger Logger, options ...WebsocketOption) (*Websocket, error)
 		WriteBufferSize:   config.writeBufferSize,
 		NetDialTLSContext: config.tlsClient.GetTLSDialer(),
 		NetDialContext:    config.tlsClient.GetDialer().DialContext,
+		// iOS URLSession / ktor-client both offer permessage-deflate (capture 2026-10-02).
+		EnableCompression: true,
 	}
 
 	return &Websocket{

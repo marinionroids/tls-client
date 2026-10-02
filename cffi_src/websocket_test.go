@@ -2,6 +2,7 @@ package tls_client_cffi_src
 
 import (
 	"encoding/base64"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -160,4 +161,30 @@ func TestWsWriteErrorClosesConnection(t *testing.T) {
 
 	_, ok := wsConnections.Load(connectionId)
 	require.False(t, ok)
+}
+
+func TestWsStats(t *testing.T) {
+	connectionId := wsTestConnect(t)
+
+	_, err := WsWrite(WsWriteInput{ConnectionId: connectionId, MessageType: websocket.TextMessage, Data: "hello"})
+	require.Nil(t, err)
+	_, err = WsRead(WsReadInput{ConnectionId: connectionId, TimeoutMilliseconds: 5000})
+	require.Nil(t, err)
+
+	stats, err := WsStats(WsStatsInput{ConnectionId: connectionId})
+	require.Nil(t, err)
+	require.EqualValues(t, 1, stats.MessagesRead)
+	require.EqualValues(t, 1, stats.MessagesWritten)
+	require.EqualValues(t, 5, stats.BytesWritten)
+	require.GreaterOrEqual(t, stats.MsSinceLastRead, int64(0))
+	require.False(t, stats.UnreadPending)
+	if runtime.GOOS == "linux" {
+		require.NotNil(t, stats.Tcp)
+		require.EqualValues(t, 1, stats.Tcp.State)
+	}
+
+	_, err = WsClose(WsCloseInput{ConnectionId: connectionId})
+	require.Nil(t, err)
+	_, err = WsStats(WsStatsInput{ConnectionId: connectionId})
+	require.NotNil(t, err)
 }

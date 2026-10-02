@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	http "github.com/bogdanfinn/fhttp"
@@ -35,14 +36,33 @@ type wsConn struct {
 	done      chan struct{}
 	closeOnce sync.Once
 	writeLck  sync.Mutex
+
+	// counters for WsStats; times are unix milliseconds, 0 = never
+	connectedAt     int64
+	messagesRead    atomic.Int64
+	messagesWritten atomic.Int64
+	bytesRead       atomic.Int64
+	bytesWritten    atomic.Int64
+	lastReadAt      atomic.Int64
+	lastWriteAt     atomic.Int64
+	lastWriteDurMs  atomic.Int64
+	maxWriteDurMs   atomic.Int64
+	unreadPending   atomic.Bool // readPump holds a message nobody has collected with WsRead yet
 }
 
 func (c *wsConn) readPump() {
 	for {
 		mt, data, err := c.conn.ReadMessage()
+		if err == nil {
+			c.messagesRead.Add(1)
+			c.bytesRead.Add(int64(len(data)))
+			c.lastReadAt.Store(time.Now().UnixMilli())
+		}
 
+		c.unreadPending.Store(true)
 		select {
 		case c.messages <- wsMessage{messageType: mt, data: data, err: err}:
+			c.unreadPending.Store(false)
 		case <-c.done:
 			return
 		}
@@ -161,9 +181,10 @@ func WsConnect(input WsConnectInput) (WsConnectOutput, *TLSClientError) {
 
 	connectionId := uuid.New().String()
 	c := &wsConn{
-		conn:     conn,
-		messages: make(chan wsMessage),
-		done:     make(chan struct{}),
+		conn:        conn,
+		messages:    make(chan wsMessage),
+		done:        make(chan struct{}),
+		connectedAt: time.Now().UnixMilli(),
 	}
 	wsConnections.Store(connectionId, c)
 	go c.readPump()
@@ -249,9 +270,21 @@ func WsWrite(input WsWriteInput) (WsWriteOutput, *TLSClientError) {
 		}
 	}
 
+	writeStart := time.Now() // includes the wait for the write lock
 	c.writeLck.Lock()
 	writeErr := c.conn.WriteMessage(input.MessageType, msgData)
 	c.writeLck.Unlock()
+
+	durMs := time.Since(writeStart).Milliseconds()
+	c.lastWriteDurMs.Store(durMs)
+	if durMs > c.maxWriteDurMs.Load() {
+		c.maxWriteDurMs.Store(durMs) // racy max is fine for a diagnostic
+	}
+	if writeErr == nil {
+		c.messagesWritten.Add(1)
+		c.bytesWritten.Add(int64(len(msgData)))
+		c.lastWriteAt.Store(time.Now().UnixMilli())
+	}
 
 	if writeErr != nil {
 		// write errors are permanent on a websocket conn: drop it so a blocked WsRead returns
@@ -278,5 +311,42 @@ func WsClose(input WsCloseInput) (WsCloseOutput, *TLSClientError) {
 	return WsCloseOutput{
 		Id:      uuid.New().String(),
 		Success: true,
+	}, nil
+}
+
+// WsStats returns a snapshot of a live connection for diagnosing silent stalls: message counters,
+// how long ago the last message was read / written, how long writes block, whether a message is
+// waiting for WsRead, and (linux) the kernel's TCP_INFO for the socket to the server or proxy.
+// It never touches the wire. A connection that already failed or was closed is gone from the store.
+func WsStats(input WsStatsInput) (WsStatsOutput, *TLSClientError) {
+	c, clientErr := getWsConn(input.ConnectionId)
+	if clientErr != nil {
+		return WsStatsOutput{}, clientErr
+	}
+
+	now := time.Now().UnixMilli()
+	since := func(at int64) int64 {
+		if at == 0 {
+			return -1
+		}
+		return now - at
+	}
+
+	return WsStatsOutput{
+		Id:                  uuid.New().String(),
+		ConnectionId:        input.ConnectionId,
+		AgeMs:               now - c.connectedAt,
+		MessagesRead:        c.messagesRead.Load(),
+		MessagesWritten:     c.messagesWritten.Load(),
+		BytesRead:           c.bytesRead.Load(),
+		BytesWritten:        c.bytesWritten.Load(),
+		MsSinceLastRead:     since(c.lastReadAt.Load()),
+		MsSinceLastWrite:    since(c.lastWriteAt.Load()),
+		LastWriteDurationMs: c.lastWriteDurMs.Load(),
+		MaxWriteDurationMs:  c.maxWriteDurMs.Load(),
+		UnreadPending:       c.unreadPending.Load(),
+		LocalAddr:           c.conn.LocalAddr().String(),
+		RemoteAddr:          c.conn.RemoteAddr().String(),
+		Tcp:                 wsTcpInfo(c.conn.UnderlyingConn()),
 	}, nil
 }

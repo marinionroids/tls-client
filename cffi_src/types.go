@@ -273,3 +273,46 @@ type WsCloseOutput struct {
 	Id      string `json:"id"`
 	Success bool   `json:"success"`
 }
+
+// WsStatsInput contains the parameters for reading a WebSocket connection's diagnostics.
+type WsStatsInput struct {
+	ConnectionId string `json:"connectionId"`
+}
+
+// WsStatsOutput is a diagnostic snapshot of a WebSocket connection. Counters are application
+// messages (not control frames). MsSince* are -1 when nothing was read / written yet.
+type WsStatsOutput struct {
+	Tcp                 *WsTcpInfo `json:"tcp,omitempty"`
+	Id                  string     `json:"id"`
+	ConnectionId        string     `json:"connectionId"`
+	LocalAddr           string     `json:"localAddr"`
+	RemoteAddr          string     `json:"remoteAddr"`
+	AgeMs               int64      `json:"ageMs"`
+	MessagesRead        int64      `json:"messagesRead"`
+	MessagesWritten     int64      `json:"messagesWritten"`
+	BytesRead           int64      `json:"bytesRead"`
+	BytesWritten        int64      `json:"bytesWritten"`
+	MsSinceLastRead     int64      `json:"msSinceLastRead"`
+	MsSinceLastWrite    int64      `json:"msSinceLastWrite"`
+	LastWriteDurationMs int64      `json:"lastWriteDurationMs"`
+	MaxWriteDurationMs  int64      `json:"maxWriteDurationMs"`
+	UnreadPending       bool       `json:"unreadPending"`
+}
+
+// WsTcpInfo is the kernel's view of the TCP socket (linux TCP_INFO). With a proxy this is the
+// connection to the proxy. Growing Unacked / Retransmits with a stale MsSinceLastAckRecv means
+// our bytes are not being acknowledged: the path is dead even though writes still "succeed".
+type WsTcpInfo struct {
+	State               uint8  `json:"state"` // 1 = ESTABLISHED
+	Retransmits         uint8  `json:"retransmits"`
+	Backoff             uint8  `json:"backoff"`
+	RtoMs               uint32 `json:"rtoMs"`
+	RttMs               uint32 `json:"rttMs"`
+	Unacked             uint32 `json:"unacked"`
+	Lost                uint32 `json:"lost"`
+	TotalRetrans        uint32 `json:"totalRetrans"`
+	NotsentBytes        uint32 `json:"notsentBytes"`
+	MsSinceLastDataSent uint32 `json:"msSinceLastDataSent"`
+	MsSinceLastDataRecv uint32 `json:"msSinceLastDataRecv"`
+	MsSinceLastAckRecv  uint32 `json:"msSinceLastAckRecv"`
+}
